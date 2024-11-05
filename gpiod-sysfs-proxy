@@ -1,0 +1,667 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+import errno
+import os
+import re
+import select
+import stat
+import time
+from threading import Lock, Thread
+
+import fuse
+import gpiod
+import pyudev
+from fuse import Direntry, Fuse, Stat
+from gpiod.line import Direction, Edge, Value
+
+fuse.fuse_python_api = (0, 2)
+
+
+class Range:
+
+    def __init__(self, base, size):
+        self._base = base
+        self._size = size
+
+    @property
+    def base(self):
+        return self._base
+
+    @property
+    def size(self):
+        return self._size
+
+    @property
+    def end(self):
+        return self.base + self.size
+
+
+class RangeManager:
+
+    BASE = 512
+
+    def __init__(self):
+        self._ranges = list()
+
+    def get_new_base(self, size):
+        # If there are no other ranges, just add the first one.
+        if not self._ranges:
+            new = Range(RangeManager.BASE, size)
+            self._ranges.append(new)
+        else:
+            nranges = len(self._ranges)
+            base = RangeManager.BASE
+
+            for i in range(nranges):
+                curr = self._ranges[i]
+
+                if base + size < curr.base:
+                    # This range fits before the current element.
+                    new = Range(base, size)
+                    self._ranges.insert(i, new)
+                else:
+                    base = curr.end
+
+                    if i == nranges - 1:
+                        # This was the last element so just append the new range.
+                        new = Range(base, size)
+                        self._ranges.append(new)
+
+        return new.base
+
+    def free_range(self, base):
+        if entry in self._ranges:
+            self._ranges.remove(entry)
+        else:
+            raise ValueError(f"Range not found for base {base}")
+
+
+class Entry:
+
+    def __init__(self, parent):
+        self._parent = parent
+        self._stat = Stat()
+        self.stat.st_atime = self.stat.st_ctime = self.stat.st_mtime = time.time()
+
+    def get_entry(self, tokens):
+        raise NotImplementedError
+
+    def readdir(self, offset):
+        raise NotImplementedError
+
+    def getattr(self):
+        return self.stat
+
+    def open(self, flags):
+        raise NotImplementedError
+
+    def read(self, size, offset):
+        raise NotImplementedError
+
+    def write(self, buf, offset):
+        raise NotImplementedError
+
+    def poll(self, pollhandle):
+        raise NotImplementedError
+
+    def readlink(self):
+        raise NotImplementedError
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @property
+    def stat(self):
+        return self._stat
+
+
+class NoEntry:
+
+    def readdir(self, offset):
+        return -errno.ENOENT
+
+    def getattr(self):
+        return -errno.ENOENT
+
+    def open(self, flags):
+        return -errno.ENOENT
+
+    def readlink(self):
+        return -errno.EPERM
+
+
+class Directory(Entry):
+
+    def __init__(self, parent):
+        Entry.__init__(self, parent)
+
+        self.stat.st_mode = stat.S_IFDIR | 0o755
+        self.stat.st_nlink = 1
+
+        self._children = dict()
+
+    def get_entry(self, tokens):
+        if tokens[0] in self._children:
+            if len(tokens) > 1:
+                return self._children[tokens[0]].get_entry(tokens[1:])
+
+            return self._children[tokens[0]]
+
+        return NoEntry()
+
+    def readdir(self, offset):
+        for name in [".", ".."] + list(self._children.keys()):
+            yield Direntry(name)
+
+    @property
+    def children(self):
+        return self._children
+
+
+class Attribute(Entry):
+
+    def __init__(self, parent):
+        Entry.__init__(self, parent)
+
+        self.stat.st_mode = stat.S_IFREG | 0o200
+        self.stat.st_nlink = 1
+        self.stat.st_size = 4096
+
+    def open(self, flags):
+        return 0
+
+
+class ConstRoAttr(Attribute):
+
+    def __init__(self, parent, value):
+        Attribute.__init__(self, parent)
+        self._value = value
+
+    def read(self, size, offset):
+        return f"{self._value}\n".encode()
+
+
+class RwAttr(Attribute):
+
+    def __init__(self, parent):
+        Attribute.__init__(self, parent)
+
+    def write(self, buf, offset):
+        try:
+            self.do_write(buf.strip().decode())
+        except ValueError as ex:
+            return -errno.EINVAL
+
+        return len(buf)
+
+    def do_write(self, buf):
+        raise NotImplementedError
+
+
+class Link(Entry):
+
+    def __init__(self, parent, path):
+        Entry.__init__(self, parent)
+
+        self._path = path
+
+        self.stat.st_mode = stat.S_IFLNK | 0o755
+        self.stat.st_nlink = 2
+        self.stat.st_size = 0
+
+    def readlink(self):
+        return self._path
+
+
+class ExportBase(RwAttr):
+
+    def __init__(self, parent):
+        Attribute.__init__(self, parent)
+
+    def do_write(self, buf):
+        if not buf.isdigit():
+            raise ValueError
+
+
+class Export(ExportBase):
+
+    def __init__(self, parent):
+        ExportBase.__init__(self, parent)
+
+    def do_write(self, buf):
+        ExportBase.do_write(self, buf)
+
+        gpio = int(buf)
+
+        for name, entry in self.parent.children.items():
+            if not isinstance(entry, Gpiochip):
+                continue
+
+            if entry.has_gpio(gpio):
+                entry.request(gpio)
+                return None
+
+        raise ValueError
+
+
+class Unexport(ExportBase):
+
+    def __init__(self, parent):
+        ExportBase.__init__(self, parent)
+
+    def do_write(self, buf):
+        ExportBase.do_write(self, buf)
+
+        gpio = f"gpio{int(buf)}"
+
+        if gpio not in self.parent.children:
+            raise ValueError
+
+        entry = self.parent.children[gpio]
+        entry.unexport()
+        self.parent.children.pop(gpio)
+
+
+class UeventAttr(RwAttr):
+
+    CMDS = "(add|remove|change|move|online|offline|bind|unbind)"
+    UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    VARS = "(\\s+[A-Za-z0-9_]+\\=[A-Za-z0-9_]+)*"
+    PATTERN = f"^{CMDS}\\s+{UUID}{VARS}$"
+
+    def __init__(self, parent):
+        RwAttr.__init__(self, parent)
+
+    def read(self, size, offset):
+        return b""
+
+    def do_write(self, buf):
+        if not re.match(UeventAttr.PATTERN, buf):
+            raise ValueError
+
+
+class Gpiochip(Directory):
+
+    def __init__(self, parent, handle, base, syspath):
+        Directory.__init__(self, parent)
+        self._handle = handle
+        self._info = self._handle.get_info()
+        self._base = base
+
+        self.children["base"] = ConstRoAttr(self, base)
+        self.children["label"] = ConstRoAttr(self, self._info.label)
+        self.children["ngpio"] = ConstRoAttr(self, self._info.num_lines)
+        self.children["uevent"] = UeventAttr(self)
+        self.children["device"] = Link(self, syspath)
+        self.children["power"] = Link(
+            self, f"/sys/bus/gpio/devices/{self._info.name}/power"
+        )
+        self.children["subsystem"] = Link(self, self.parent.mountpoint)
+
+    def has_gpio(self, gpio):
+        return (
+            True
+            if gpio >= self._base and gpio < (self._base + self._info.num_lines - 1)
+            else False
+        )
+
+    def request(self, gpio):
+        offset = gpio - self._base
+
+        request = self._handle.request_lines(
+            consumer="sysfs",
+            config={offset: gpiod.LineSettings(direction=Direction.AS_IS)},
+        )
+
+        self.parent.children[f"gpio{gpio}"] = Gpio(
+            self.parent, request, self._handle.get_line_info(offset)
+        )
+
+    @property
+    def name(self):
+        return self._info.name
+
+
+class RwAttrWithVal(RwAttr):
+
+    def __init__(self, parent, init_val):
+        RwAttr.__init__(self, parent)
+        self._value = init_val
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, val):
+        self._value = val
+
+
+class DirectionAttr(RwAttrWithVal):
+
+    def __init__(self, parent, init_val):
+        RwAttrWithVal.__init__(self, parent, init_val)
+
+    def read(self, size, offset):
+        dirstr = "in" if self.value == Direction.INPUT else "out"
+        return f"{dirstr}\n".encode()
+
+    def do_write(self, buf):
+        if buf == "in":
+            self.value = Direction.INPUT
+        elif buf == "out":
+            self.value = Direction.OUTPUT
+        else:
+            raise ValueError
+
+        self.parent.reconfigure()
+
+
+class EdgeAttr(RwAttrWithVal):
+
+    def __init__(self, parent, init_val):
+        RwAttrWithVal.__init__(self, parent, init_val)
+
+    def read(self, size, offset):
+        if self.value == Edge.RISING:
+            edgestr = "rising"
+        elif self.value == Edge.FALLING:
+            edgestr = "falling"
+        elif self.value == Edge.BOTH:
+            edgestr = "both"
+        else:
+            edgestr = "none"
+
+        return f"{edgestr}\n".encode()
+
+    def do_write(self, buf):
+        if buf == "none":
+            self.value = Edge.NONE
+        elif buf == "rising":
+            self.value = Edge.RISING
+        elif buf == "falling":
+            self.value = Edge.FALLING
+        elif buf == "both":
+            self.value = Edge.BOTH
+        else:
+            raise ValueError
+
+        self.parent.reconfigure()
+
+
+class ActiveLowAttr(RwAttrWithVal):
+
+    def __init__(self, parent, init_val):
+        RwAttrWithVal.__init__(self, parent, init_val)
+
+    def read(self, size, offset):
+        val = "1" if self.value else "0"
+        return f"{val}\n".encode()
+
+    def do_write(self, buf):
+        if not buf.isdigit():
+            raise ValueError
+
+        self.value = False if buf == "0" else True
+        self.parent.reconfigure()
+
+
+class ValueAttr(RwAttrWithVal):
+
+    def __init__(self, parent):
+        RwAttrWithVal.__init__(self, parent, None)
+        self._event = False
+        self._pollhandle = None
+
+    def read(self, size, offset):
+        val = "1" if self.parent.get_value() == Value.ACTIVE else "0"
+        return f"{val}\n".encode()
+
+    def do_write(self, buf):
+        if not buf.isdigit():
+            raise ValueError
+
+        val = Value.INACTIVE if buf == "0" else Value.ACTIVE
+        self.parent.set_value(val)
+
+    def poll(self, pollhandle):
+        event = self._event
+        self._event = False
+
+        if not self._pollhandle:
+            self._pollhandle = pollhandle
+
+        # sysfs never blocks on POLLIN and POLLOUT
+        return select.POLLIN | select.POLLOUT | (select.POLLPRI if event else 0)
+
+    def notify_poll(self):
+        if self._pollhandle:
+            self._event = True
+            self.parent.parent.notify_poll(self._pollhandle)
+            self._pollhandle = None
+
+
+class Gpio(Directory):
+
+    def __init__(self, parent, handle, info):
+        Directory.__init__(self, parent)
+        self._handle = handle
+        self._offset = info.offset
+
+        val = ValueAttr(self)
+
+        self.children["active_low"] = ActiveLowAttr(self, info.active_low)
+        self.children["direction"] = DirectionAttr(self, info.direction)
+        self.children["edge"] = EdgeAttr(self, info.edge_detection)
+        self.children["value"] = val
+        self.children["device"] = Link(self, "dupa")
+        self.children["power"] = Link(self, "power")
+        self.children["subsystem"] = Link(self, self.parent.mountpoint)
+        self.children["uevent"] = UeventAttr(self)
+
+        self.parent.watch_gpio(self._handle, val)
+
+    def unexport(self):
+        self.parent.unwatch_gpio(self._handle)
+        self._handle.release()
+
+    def reconfigure(self):
+        self._handle.reconfigure_lines(
+            {
+                self._offset: gpiod.LineSettings(
+                    direction=self.children["direction"].value,
+                    edge_detection=self.children["edge"].value,
+                    active_low=self.children["active_low"].value,
+                )
+            }
+        )
+
+    def get_value(self):
+        return self._handle.get_values()[0]
+
+    def set_value(self, val):
+        self._handle.set_values({self._offset: val})
+
+
+class EventThread(Thread):
+
+    def __init__(self):
+        Thread.__init__(self)
+        self._watched = dict()
+        self._rdfd, self._wrfd = os.pipe()
+        self._keep_going = True
+        self._lock = Lock()
+
+    def run(self):
+        while self._keep_going:
+            with self._lock:
+                fds = list(self._watched.keys()) + [self._rdfd]
+
+            readable, _, _ = select.select(fds, [], [], 60)
+            for fd in readable:
+                if fd == self._rdfd:
+                    # This just serves to interrupt polling.
+                    os.read(self._rdfd, 1024)
+                    continue
+
+                with self._lock:
+                    if fd in self._watched:
+                        self._watched[fd].notify_poll()
+
+    def _intr_poll(self):
+        os.write(self._wrfd, b".")
+
+    def stop(self):
+        self._keep_going = False
+        self._intr_poll()
+
+    def watch_gpio(self, request, value):
+        with self._lock:
+            self._watched[request.fd] = value
+
+        self._intr_poll()
+
+    def unwatch_gpio(self, request):
+        with self._lock:
+            self._watched.pop[request.fd]
+
+        self._intr_poll()
+
+
+class Root(Directory):
+
+    def _add_chip(self, device):
+        chip = gpiod.Chip(device.device_node)
+        base = self._ranges.get_new_base(chip.get_info().num_lines)
+        self.children[f"gpiochip{base}"] = Gpiochip(
+            self, chip, base, os.path.dirname(device.sys_path)
+        )
+
+    def _remove_chip(self, device):
+        for name, entry in self.children.items():
+            if isinstance(entry, Gpiochip) and entry.name == device.sys_name:
+                self.children.pop(name)
+                break
+
+    def _handle_udev_event(self, action, device):
+        if not device.device_node:
+            return None
+
+        if action == "bind":
+            self._add_chip(device)
+        elif action == "unbind":
+            self._remove_chip(device)
+
+    def _setup_udev(self):
+        context = pyudev.Context()
+        monitor = pyudev.Monitor.from_netlink(context)
+        monitor.filter_by("gpio")
+        self._observer = pyudev.MonitorObserver(monitor, self._handle_udev_event)
+        self._observer.start()
+
+        for device in context.list_devices(subsystem="gpio"):
+            if device.device_node:
+                self._add_chip(device)
+
+    def __init__(self, fuse):
+        Directory.__init__(self, None)
+        self._fuse = fuse
+
+        self._ranges = RangeManager()
+        self._evthread = EventThread()
+        self._setup_udev()
+        self.children["export"] = Export(self)
+        self.children["unexport"] = Unexport(self)
+
+        self._evthread.start()
+
+    def stop(self):
+        self._evthread.stop()
+        self._observer.stop()
+        self._evthread.join()
+        self._observer.join()
+
+    def getattr(self):
+        return Stat(st_mode=stat.S_IFDIR | 0o755, st_nlink=2)
+
+    def watch_gpio(self, request, value):
+        self._evthread.watch_gpio(request, value)
+
+    def unwatch_gpio(self, request):
+        self._evthread.unwatch_gpio(request)
+
+    def notify_poll(self, pollhandle):
+        self._fuse.NotifyPoll(pollhandle)
+
+    @property
+    def mountpoint(self):
+        return self._fuse.fuse_args.mountpoint
+
+
+class GpioSysfsFuse(Fuse):
+
+    def __init__(self):
+        Fuse.__init__(self)
+
+    def main(self):
+        self._root = Root(self)
+        Fuse.main(self)
+
+    def stop(self):
+        self._root.stop()
+
+    def get_entry(self, path):
+        if path == "/":
+            return self._root
+
+        return self._root.get_entry(os.path.normpath(path).split("/")[1:])
+
+    def readdir(self, path, offset):
+        return self.get_entry(path).readdir(offset)
+
+    def getattr(self, path):
+        return self.get_entry(path).getattr()
+
+    def mknod(self, path, mode, dev):
+        return -errno.EACCES
+
+    def mkdir(self, path, mode):
+        return -errno.EPERM
+
+    def open(self, path, flags):
+        return self.get_entry(path).open(flags)
+
+    def read(self, path, size, offset):
+        return self.get_entry(path).read(size, offset)
+
+    def write(self, path, buf, offset):
+        return self.get_entry(path).write(buf, offset)
+
+    def poll(self, path, pollhandle):
+        return self.get_entry(path).poll(pollhandle)
+
+    def truncate(self, path, size):
+        return 0
+
+    def flush(self, path):
+        return 0
+
+    def readlink(self, path):
+        return self.get_entry(path).readlink()
+
+    def release(self, path, flags):
+        return 0
+
+
+def main():
+    server = GpioSysfsFuse()
+    server.parse()
+    server.main()
+    server.stop()
+
+
+if __name__ == "__main__":
+    main()

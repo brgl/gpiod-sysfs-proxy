@@ -1,0 +1,3 @@
+libgpiod-based compatibility layer for the linux GPIO sysfs interface
+
+This is a semi-functional WiP for now.
