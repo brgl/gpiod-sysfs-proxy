@@ -166,7 +166,7 @@ class Attribute(Entry):
     def __init__(self, parent):
         Entry.__init__(self, parent)
 
-        self.stat.st_mode = stat.S_IFREG | 0o200
+        self.stat.st_mode = stat.S_IFREG
         self.stat.st_nlink = 1
         self.stat.st_size = 4096
 
@@ -179,6 +179,7 @@ class ConstRoAttr(Attribute):
     def __init__(self, parent, value):
         Attribute.__init__(self, parent)
         self._value = value
+        self.stat.st_mode = self.stat.st_mode | 0o444
 
     def read(self, size, offset):
         return f"{self._value}\n".encode()
@@ -188,6 +189,7 @@ class RwAttr(Attribute):
 
     def __init__(self, parent):
         Attribute.__init__(self, parent)
+        self.stat.st_mode = self.stat.st_mode | 0o644
 
     def write(self, buf, offset):
         try:
@@ -220,6 +222,8 @@ class ExportBase(RwAttr):
 
     def __init__(self, parent):
         Attribute.__init__(self, parent)
+        # export/unexport attributes are more restrictive than other rw ones
+        self.stat.st_mode = self.stat.st_mode | 0o200
 
     def do_write(self, buf):
         if not buf.isdigit():
