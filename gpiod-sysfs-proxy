@@ -629,6 +629,12 @@ class GpioSysfsFuse(Fuse):
     def mkdir(self, path, mode):
         return -errno.EPERM
 
+    def rmdir(self, path):
+        return -errno.EACCES
+
+    def unlink(self, path):
+        return -errno.EACCES
+
     def open(self, path, flags):
         return self.get_entry(path).open(flags)
 
