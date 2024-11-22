@@ -138,7 +138,17 @@ class Directory(Entry):
     def __init__(self, parent):
         Entry.__init__(self, parent)
 
-        self.stat.st_mode = stat.S_IFDIR | 0o755
+        self.stat.st_mode = (
+            stat.S_IFDIR
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IXUSR
+            | stat.S_IRGRP
+            | stat.S_IXGRP
+            | stat.S_IROTH
+            | stat.S_IXOTH
+        )
+
         self.stat.st_nlink = 1
 
         self._children = dict()
@@ -179,7 +189,9 @@ class ConstRoAttr(Attribute):
     def __init__(self, parent, value):
         Attribute.__init__(self, parent)
         self._value = value
-        self.stat.st_mode = self.stat.st_mode | 0o444
+        self.stat.st_mode = self.stat.st_mode | (
+            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
+        )
 
     def read(self, size, offset):
         return f"{self._value}\n".encode()
@@ -189,7 +201,9 @@ class RwAttr(Attribute):
 
     def __init__(self, parent):
         Attribute.__init__(self, parent)
-        self.stat.st_mode = self.stat.st_mode | 0o644
+        self.stat.st_mode = self.stat.st_mode | (
+            stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+        )
 
     def write(self, buf, offset):
         try:
@@ -210,7 +224,17 @@ class Link(Entry):
 
         self._path = path
 
-        self.stat.st_mode = stat.S_IFLNK | 0o755
+        self.stat.st_mode = (
+            stat.S_IFLNK
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IXUSR
+            | stat.S_IRGRP
+            | stat.S_IXGRP
+            | stat.S_IROTH
+            | stat.S_IXOTH
+        )
+
         self.stat.st_nlink = 2
         self.stat.st_size = 0
 
@@ -223,7 +247,7 @@ class ExportBase(RwAttr):
     def __init__(self, parent):
         Attribute.__init__(self, parent)
         # export/unexport attributes are more restrictive than other rw ones
-        self.stat.st_mode = self.stat.st_mode | 0o200
+        self.stat.st_mode = self.stat.st_mode | stat.S_IWUSR
 
     def do_write(self, buf):
         if not buf.isdigit():
