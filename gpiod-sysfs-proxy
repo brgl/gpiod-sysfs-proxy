@@ -563,7 +563,7 @@ class EventThread(Thread):
 
     def unwatch_gpio(self, request):
         with self._lock:
-            self._watched.pop[request.fd]
+            self._watched.pop(request.fd)
 
         self._intr_poll()
 
