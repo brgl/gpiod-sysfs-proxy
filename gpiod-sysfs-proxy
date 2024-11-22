@@ -350,6 +350,9 @@ class Gpiochip(Directory):
             self.parent, request, self._handle.get_line_info(offset)
         )
 
+    def close(self):
+        self._handle.close()
+
     @property
     def name(self):
         return self._info.name
@@ -578,6 +581,7 @@ class Root(Directory):
         for name, entry in self.children.items():
             if isinstance(entry, Gpiochip) and entry.name == device.sys_name:
                 chip = self.children.pop(name)
+                chip.close()
                 self._ranges.free_range(chip.base)
                 break
 
