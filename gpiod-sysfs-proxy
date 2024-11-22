@@ -568,6 +568,7 @@ class Root(Directory):
 
     def __init__(self, fuse):
         Directory.__init__(self, None)
+        self.stat.st_nlink = 2
         self._fuse = fuse
 
         self._ranges = RangeManager()
@@ -583,9 +584,6 @@ class Root(Directory):
         self._observer.stop()
         self._evthread.join()
         self._observer.join()
-
-    def getattr(self):
-        return Stat(st_mode=stat.S_IFDIR | 0o755, st_nlink=2)
 
     def watch_gpio(self, request, value):
         self._evthread.watch_gpio(request, value)
