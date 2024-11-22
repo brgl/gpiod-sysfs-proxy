@@ -210,7 +210,7 @@ class RwAttr(Attribute):
     def write(self, buf, offset):
         try:
             self.do_write(buf.strip().decode())
-        except ValueError as ex:
+        except ValueError:
             return -errno.EINVAL
 
         return len(buf)
