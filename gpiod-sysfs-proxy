@@ -72,10 +72,12 @@ class RangeManager:
         return new.base
 
     def free_range(self, base):
-        if entry in self._ranges:
-            self._ranges.remove(entry)
-        else:
-            raise ValueError(f"Range not found for base {base}")
+        for entry in self._ranges:
+            if base == entry.base:
+                self._ranges.remove(entry)
+                return
+
+        raise ValueError(f"Range not found for base {base}")
 
 
 class Entry:
@@ -352,6 +354,10 @@ class Gpiochip(Directory):
     def name(self):
         return self._info.name
 
+    @property
+    def base(self):
+        return self._base
+
 
 class RwAttrWithVal(RwAttr):
 
@@ -571,7 +577,8 @@ class Root(Directory):
     def _remove_chip(self, device):
         for name, entry in self.children.items():
             if isinstance(entry, Gpiochip) and entry.name == device.sys_name:
-                self.children.pop(name)
+                chip = self.children.pop(name)
+                self._ranges.free_range(chip.base)
                 break
 
     def _handle_udev_event(self, action, device):
