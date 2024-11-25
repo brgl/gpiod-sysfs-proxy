@@ -247,9 +247,9 @@ class Link(Entry):
 class ExportBase(RwAttr):
 
     def __init__(self, parent):
-        Attribute.__init__(self, parent)
+        RwAttr.__init__(self, parent)
         # export/unexport attributes are more restrictive than other rw ones
-        self.stat.st_mode = self.stat.st_mode | stat.S_IWUSR
+        self.stat.st_mode = stat.S_IFREG | stat.S_IWUSR
 
     def do_write(self, buf):
         if not buf.isdigit():
