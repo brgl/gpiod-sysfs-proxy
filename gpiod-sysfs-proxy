@@ -593,10 +593,14 @@ class Root(Directory):
         if not device.device_node:
             return None
 
-        if action == "bind":
-            self._add_chip(device)
-        elif action == "unbind":
-            self._remove_chip(device)
+        try:
+            if action == "bind":
+                self._add_chip(device)
+            elif action == "unbind":
+                self._remove_chip(device)
+        except OSError as ex:
+            if ex.errno != errno.ENOENT:
+                raise
 
     def _setup_udev(self):
         context = pyudev.Context()
