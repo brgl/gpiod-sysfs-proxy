@@ -702,8 +702,11 @@ class GpioSysfsFuse(Fuse):
 def main():
     server = GpioSysfsFuse()
     server.parse()
-    server.main()
-    server.stop()
+
+    try:
+        server.main()
+    finally:
+        server.stop()
 
 
 if __name__ == "__main__":
