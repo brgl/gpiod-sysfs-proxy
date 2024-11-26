@@ -103,7 +103,7 @@ class Entry:
         raise NotImplementedError
 
     def write(self, buf, offset):
-        raise NotImplementedError
+        return -errno.EPERM
 
     def poll(self, pollhandle):
         raise NotImplementedError
