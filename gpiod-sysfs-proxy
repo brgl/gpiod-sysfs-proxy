@@ -326,9 +326,7 @@ class Gpiochip(Directory):
         self.children["ngpio"] = ConstRoAttr(self, self._info.num_lines)
         self.children["uevent"] = UeventAttr(self)
         self.children["device"] = Link(self, syspath)
-        self.children["power"] = Link(
-            self, f"/sys/bus/gpio/devices/{self._info.name}/power"
-        )
+        self.children["power"] = Link(self, f"{syspath}/power")
         self.children["subsystem"] = Link(self, self.parent.mountpoint)
 
     def has_gpio(self, gpio):
@@ -347,7 +345,7 @@ class Gpiochip(Directory):
         )
 
         self.parent.children[f"gpio{gpio}"] = Gpio(
-            self.parent, request, self._handle.get_line_info(offset)
+            self.parent, request, self._handle.get_line_info(offset), self._info.name
         )
 
     def close(self):
@@ -483,7 +481,7 @@ class ValueAttr(RwAttrWithVal):
 
 class Gpio(Directory):
 
-    def __init__(self, parent, handle, info):
+    def __init__(self, parent, handle, info, chip_name):
         Directory.__init__(self, parent)
         self._handle = handle
         self._offset = info.offset
@@ -494,8 +492,8 @@ class Gpio(Directory):
         self.children["direction"] = DirectionAttr(self, info.direction)
         self.children["edge"] = EdgeAttr(self, info.edge_detection)
         self.children["value"] = val
-        self.children["device"] = Link(self, "dupa")
-        self.children["power"] = Link(self, "power")
+        self.children["device"] = Link(self, f"/sys/bus/gpio/devices/{chip_name}")
+        self.children["power"] = Link(self, f"/sys/bus/gpio/devices/{chip_name}/power")
         self.children["subsystem"] = Link(self, self.parent.mountpoint)
         self.children["uevent"] = UeventAttr(self)
 
