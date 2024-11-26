@@ -111,6 +111,9 @@ class Entry:
     def readlink(self):
         raise NotImplementedError
 
+    def rmdir(self, path):
+        return -errno.EPERM
+
     @property
     def parent(self):
         return self._parent
@@ -167,6 +170,9 @@ class Directory(Entry):
     def readdir(self, offset):
         for name in [".", ".."] + list(self._children.keys()):
             yield Direntry(name)
+
+    def rmdir(self, path):
+        return -errno.ENOTDIR
 
     @property
     def children(self):
@@ -667,7 +673,7 @@ class GpioSysfsFuse(Fuse):
         return -errno.EPERM
 
     def rmdir(self, path):
-        return -errno.EACCES
+        return self.get_entry(path).rmdir(path)
 
     def unlink(self, path):
         return -errno.EACCES
