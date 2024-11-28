@@ -527,6 +527,10 @@ class Gpio(Directory):
     def set_value(self, val):
         self._handle.set_values({self._offset: val})
 
+    @property
+    def chip_name(self):
+        return self._chip.name
+
 
 class EventThread(Thread):
 
@@ -582,10 +586,16 @@ class Root(Directory):
             self, chip, base, os.path.dirname(device.sys_path)
         )
 
+    def _remove_chip_gpios(self, chip):
+        for name, entry in list(self.children.items()):
+            if isinstance(entry, Gpio) and entry.chip_name == chip.name:
+                self.children.pop(name)
+
     def _remove_chip(self, device):
-        for name, entry in self.children.items():
+        for name, entry in list(self.children.items()):
             if isinstance(entry, Gpiochip) and entry.name == device.sys_name:
                 chip = self.children.pop(name)
+                self._remove_chip_gpios(chip)
                 chip.close()
                 self._ranges.free_range(chip.base)
                 break
