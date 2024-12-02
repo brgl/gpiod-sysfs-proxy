@@ -338,7 +338,7 @@ class Gpiochip(Directory):
     def has_gpio(self, gpio):
         return (
             True
-            if gpio >= self._base and gpio < (self._base + self._info.num_lines - 1)
+            if gpio >= self._base and gpio < (self._base + self._info.num_lines)
             else False
         )
 
