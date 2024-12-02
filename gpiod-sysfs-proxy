@@ -555,6 +555,14 @@ class EventThread(Thread):
 
                 with self._lock:
                     if fd in self._watched:
+                        # Consume the event. Ignore errors as the caller may end up
+                        # closing the file descriptor before we get here and we don't
+                        # care about the result anyway.
+                        try:
+                            os.read(fd, 4096)
+                        except Exception:
+                            pass
+
                         self._watched[fd].notify_poll()
 
     def _intr_poll(self):
