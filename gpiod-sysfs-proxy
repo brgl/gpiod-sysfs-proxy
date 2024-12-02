@@ -114,6 +114,10 @@ class Entry:
     def rmdir(self, path):
         return -errno.EPERM
 
+    def chmod(self, mode):
+        self.stat.st_mode = mode
+        return 0
+
     def chown(self, uid, gid):
         self.stat.st_uid = uid
         self.stat.st_gid = gid
@@ -693,6 +697,9 @@ class GpioSysfsFuse(Fuse):
 
     def getattr(self, path):
         return self.get_entry(path).getattr()
+
+    def chmod(self, path, mode):
+        return self.get_entry(path).chmod(mode)
 
     def chown(self, path, uid, gid):
         return self.get_entry(path).chown(uid, gid)
