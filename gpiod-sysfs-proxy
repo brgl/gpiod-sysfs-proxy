@@ -114,6 +114,11 @@ class Entry:
     def rmdir(self, path):
         return -errno.EPERM
 
+    def chown(self, uid, gid):
+        self.stat.st_uid = uid
+        self.stat.st_gid = gid
+        return 0
+
     @property
     def parent(self):
         return self._parent
@@ -688,6 +693,9 @@ class GpioSysfsFuse(Fuse):
 
     def getattr(self, path):
         return self.get_entry(path).getattr()
+
+    def chown(self, path, uid, gid):
+        return self.get_entry(path).chown(uid, gid)
 
     def mknod(self, path, mode, dev):
         return -errno.EACCES
