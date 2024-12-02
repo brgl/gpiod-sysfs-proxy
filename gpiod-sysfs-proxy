@@ -691,7 +691,7 @@ class GpioSysfsFuse(Fuse):
         return self.get_entry(path).rmdir(path)
 
     def unlink(self, path):
-        return -errno.EACCES
+        return -errno.EPERM
 
     def open(self, path, flags):
         return self.get_entry(path).open(flags)
