@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+[project]
+name = "gpiod-sysfs-proxy"
+version = "0.0.0"
+description = "User-space compatibility layer for linux GPIO sysfs interface"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.6.0"
+dependencies = [
+  "fuse-python>=1.0.9",
+  "gpiod>=2.1.0",
+  "pyudev>=0.24.0"
+]
+authors = [
+  {name = "Bartosz Golaszewski", email = "brgl@bgdev.pl"},
+]
+
+[project.urls]
+Homepage = "https://github.com/brgl/gpiod-sysfs-proxy"
+Issues = "https://github.com/brgl/gpiod-sysfs-proxy/issues"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
