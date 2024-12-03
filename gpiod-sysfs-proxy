@@ -684,7 +684,8 @@ class GpioSysfsFuse(Fuse):
         Fuse.main(self)
 
     def stop(self):
-        self._root.stop()
+        if hasattr(self, "_root"):
+            self._root.stop()
 
     def get_entry(self, path):
         if path == "/":
