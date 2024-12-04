@@ -680,7 +680,9 @@ class GpioSysfsFuse(Fuse):
         Fuse.__init__(self)
 
     def main(self):
-        self._root = Root(self)
+        if "showhelp" not in self.fuse_args.modifiers:
+            self._root = Root(self)
+
         Fuse.main(self)
 
     def stop(self):
