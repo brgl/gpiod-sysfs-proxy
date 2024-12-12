@@ -8,7 +8,7 @@ compatibility layer for the linux GPIO sysfs interface.
 
 It uses [FUSE](https://www.kernel.org/doc/html/v6.3/filesystems/fuse.html)
 (Filesystem in User Space) in order to expose a filesystem that can be mounted
-over /sys/class/gpio to simulate the kernel interface.
+over `/sys/class/gpio` to simulate the kernel interface.
 
 ## Running
 
@@ -22,7 +22,7 @@ The recommended command-line mount options to use are:
 gpiod-sysfs-proxy <mountpoint> -o nonempty -o allow_other -o default_permissions -o entry_timeout=0
 ```
 
-This allows to mount the compatibility layer on non-empty /sys/class/gpio,
+This allows to mount the compatibility layer on non-empty `/sys/class/gpio`,
 allows non-root users to access it, enables permission checks by the kernel
 and disables caching of entry stats (for when we remove directories from the
 script while the kernel doesn't know it).
