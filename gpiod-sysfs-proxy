@@ -627,7 +627,7 @@ class Root(Directory):
             elif action == "unbind":
                 self._remove_chip(device)
         except OSError as ex:
-            if ex.errno != errno.ENOENT:
+            if ex.errno not in [errno.ENOENT, errno.ENODEV]:
                 raise
 
     def _setup_udev(self):
