@@ -7,7 +7,9 @@ import os
 import re
 import select
 import stat
+import sys
 import time
+import traceback
 from threading import Lock, Thread
 
 import fuse
@@ -628,7 +630,8 @@ class Root(Directory):
                 self._remove_chip(device)
         except OSError as ex:
             if ex.errno not in [errno.ENOENT, errno.ENODEV]:
-                raise
+                print(traceback.format_exc(), file=sys.stderr)
+                sys.exit(1)
 
     def _setup_udev(self):
         context = pyudev.Context()
