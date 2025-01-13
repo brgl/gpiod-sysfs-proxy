@@ -74,3 +74,8 @@ after the value has been read once.
 Some legacy GPIO drivers hard-code the base GPIO number. We don't yet support
 it but it's planned as a future extension in the form of an argument that will
 allow to associate a hard-coded base with a GPIO chip by its label.
+
+## Similar projects
+
+* [sysfs-gpio-shim](https://github.com/info-beamer/sysfs-gpio-shim), written in
+C. Officially only supports Raspberry Pi.
