@@ -624,9 +624,9 @@ class Root(Directory):
             return None
 
         try:
-            if action == "bind":
+            if action == "add":
                 self._add_chip(device)
-            elif action == "unbind":
+            elif action == "remove":
                 self._remove_chip(device)
         except OSError as ex:
             if ex.errno not in [errno.ENOENT, errno.ENODEV]:
