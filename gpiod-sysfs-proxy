@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
 
+import argparse
 import errno
 import os
 import re
@@ -12,13 +13,29 @@ import time
 import traceback
 from threading import Lock, Thread
 
-import fuse
 import gpiod
+import pyfuse3
 import pyudev
-from fuse import Direntry, Fuse, Stat
+import trio
 from gpiod.line import Direction, Edge, Value
 
-fuse.fuse_python_api = (0, 2)
+_inode_lock = Lock()
+_inode_counter = pyfuse3.ROOT_INODE + 1
+_inode_map = {}
+
+
+def _alloc_inode(entry):
+    global _inode_counter
+    with _inode_lock:
+        inode = _inode_counter
+        _inode_counter += 1
+        _inode_map[inode] = entry
+    return inode
+
+
+def _free_inode(inode):
+    with _inode_lock:
+        _inode_map.pop(inode, None)
 
 
 class Range:
@@ -84,77 +101,80 @@ class RangeManager:
 
 class Entry:
 
-    def __init__(self, parent):
+    def __init__(self, parent, inode=None):
         self._parent = parent
-        self._stat = Stat()
-        self.stat.st_atime = self.stat.st_ctime = self.stat.st_mtime = time.time()
+        now_ns = int(time.time() * 1e9)
+        self._attr = pyfuse3.EntryAttributes()
+        if inode is not None:
+            self._inode = inode
+            with _inode_lock:
+                _inode_map[inode] = self
+        else:
+            self._inode = _alloc_inode(self)
+        self._attr.st_ino = self._inode
+        self._attr.st_uid = os.getuid()
+        self._attr.st_gid = os.getgid()
+        self._attr.st_atime_ns = now_ns
+        self._attr.st_mtime_ns = now_ns
+        self._attr.st_ctime_ns = now_ns
+        self._attr.st_rdev = 0
+        self._attr.generation = 0
+        self._attr.entry_timeout = 300
+        self._attr.attr_timeout = 300
+
+    @property
+    def inode(self):
+        return self._inode
 
     def get_entry(self, tokens):
-        raise NotImplementedError
-
-    def readdir(self, offset):
-        raise NotImplementedError
+        raise pyfuse3.FUSEError(errno.ENOTDIR)
 
     def getattr(self):
-        return self.stat
+        return self._attr
 
     def open(self, flags):
-        raise NotImplementedError
+        raise pyfuse3.FUSEError(errno.EACCES)
 
     def read(self, size, offset):
-        raise NotImplementedError
+        raise pyfuse3.FUSEError(errno.EACCES)
 
     def write(self, buf, offset):
-        return -errno.EPERM
+        raise pyfuse3.FUSEError(errno.EPERM)
 
-    def poll(self, pollhandle):
-        raise NotImplementedError
+    def poll(self, poll_handle):
+        raise pyfuse3.FUSEError(errno.ENOSYS)
 
     def readlink(self):
-        raise NotImplementedError
+        raise pyfuse3.FUSEError(errno.EINVAL)
 
-    def rmdir(self, path):
-        return -errno.EPERM
+    def rmdir(self):
+        raise pyfuse3.FUSEError(errno.EPERM)
 
     def chmod(self, mode):
-        self.stat.st_mode = mode
-        return 0
+        self._attr.st_mode = mode
 
     def chown(self, uid, gid):
-        self.stat.st_uid = uid
-        self.stat.st_gid = gid
-        return 0
+        self._attr.st_uid = uid
+        self._attr.st_gid = gid
+
+    def free(self):
+        _free_inode(self._inode)
 
     @property
     def parent(self):
         return self._parent
 
     @property
-    def stat(self):
-        return self._stat
-
-
-class NoEntry:
-
-    def readdir(self, offset):
-        return -errno.ENOENT
-
-    def getattr(self):
-        return -errno.ENOENT
-
-    def open(self, flags):
-        return -errno.ENOENT
-
-    def readlink(self):
-        return -errno.EPERM
+    def attr(self):
+        return self._attr
 
 
 class Directory(Entry):
 
-    def __init__(self, parent):
-        Entry.__init__(self, parent)
+    def __init__(self, parent, inode=None):
+        Entry.__init__(self, parent, inode=inode)
 
-        self.stat.st_mode = (
+        self._attr.st_mode = (
             stat.S_IFDIR
             | stat.S_IRUSR
             | stat.S_IWUSR
@@ -165,7 +185,8 @@ class Directory(Entry):
             | stat.S_IXOTH
         )
 
-        self.stat.st_nlink = 1
+        self._attr.st_nlink = 1
+        self._attr.st_size = 0
 
         self._children = dict()
 
@@ -176,14 +197,15 @@ class Directory(Entry):
 
             return self._children[tokens[0]]
 
-        return NoEntry()
+        raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def readdir(self, offset):
-        for name in [".", ".."] + list(self._children.keys()):
-            yield Direntry(name)
+    def rmdir(self):
+        raise pyfuse3.FUSEError(errno.ENOTDIR)
 
-    def rmdir(self, path):
-        return -errno.ENOTDIR
+    def free(self):
+        for child in list(self._children.values()):
+            child.free()
+        Entry.free(self)
 
     @property
     def children(self):
@@ -195,9 +217,9 @@ class Attribute(Entry):
     def __init__(self, parent):
         Entry.__init__(self, parent)
 
-        self.stat.st_mode = stat.S_IFREG
-        self.stat.st_nlink = 1
-        self.stat.st_size = 4096
+        self._attr.st_mode = stat.S_IFREG
+        self._attr.st_nlink = 1
+        self._attr.st_size = 4096
 
     def open(self, flags):
         return 0
@@ -208,7 +230,7 @@ class ConstRoAttr(Attribute):
     def __init__(self, parent, value):
         Attribute.__init__(self, parent)
         self._value = value
-        self.stat.st_mode = self.stat.st_mode | (
+        self._attr.st_mode = self._attr.st_mode | (
             stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
         )
 
@@ -220,7 +242,7 @@ class RwAttr(Attribute):
 
     def __init__(self, parent):
         Attribute.__init__(self, parent)
-        self.stat.st_mode = self.stat.st_mode | (
+        self._attr.st_mode = self._attr.st_mode | (
             stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
         )
 
@@ -228,7 +250,7 @@ class RwAttr(Attribute):
         try:
             self.do_write(buf.strip().decode())
         except ValueError:
-            return -errno.EINVAL
+            raise pyfuse3.FUSEError(errno.EINVAL)
 
         return len(buf)
 
@@ -243,7 +265,7 @@ class Link(Entry):
 
         self._path = path
 
-        self.stat.st_mode = (
+        self._attr.st_mode = (
             stat.S_IFLNK
             | stat.S_IRUSR
             | stat.S_IWUSR
@@ -254,19 +276,18 @@ class Link(Entry):
             | stat.S_IXOTH
         )
 
-        self.stat.st_nlink = 2
-        self.stat.st_size = 0
+        self._attr.st_nlink = 2
+        self._attr.st_size = 0
 
     def readlink(self):
-        return self._path
+        return self._path.encode()
 
 
 class ExportBase(RwAttr):
 
     def __init__(self, parent):
         RwAttr.__init__(self, parent)
-        # export/unexport attributes are more restrictive than other rw ones
-        self.stat.st_mode = stat.S_IFREG | stat.S_IWUSR
+        self._attr.st_mode = stat.S_IFREG | stat.S_IWUSR
 
     def do_write(self, buf):
         if not buf.isdigit():
@@ -307,9 +328,9 @@ class Unexport(ExportBase):
         if gpio not in self.parent.children:
             raise ValueError
 
-        entry = self.parent.children[gpio]
+        entry = self.parent.children.pop(gpio)
         entry.unexport()
-        self.parent.children.pop(gpio)
+        entry.free()
 
 
 class UeventAttr(RwAttr):
@@ -347,11 +368,7 @@ class Gpiochip(Directory):
         self.children["subsystem"] = Link(self, self.parent.mountpoint)
 
     def has_gpio(self, gpio):
-        return (
-            True
-            if gpio >= self._base and gpio < (self._base + self._info.num_lines)
-            else False
-        )
+        return gpio >= self._base and gpio < (self._base + self._info.num_lines)
 
     def request(self, gpio):
         offset = gpio - self._base
@@ -466,7 +483,7 @@ class ValueAttr(RwAttrWithVal):
     def __init__(self, parent):
         RwAttrWithVal.__init__(self, parent, None)
         self._event = False
-        self._pollhandle = None
+        self._poll_handle = None
 
     def read(self, size, offset):
         val = "1" if self.parent.get_value() == Value.ACTIVE else "0"
@@ -479,21 +496,20 @@ class ValueAttr(RwAttrWithVal):
         val = Value.INACTIVE if buf == "0" else Value.ACTIVE
         self.parent.set_value(val)
 
-    def poll(self, pollhandle):
+    def poll(self, poll_handle):
         event = self._event
         self._event = False
 
-        if not self._pollhandle:
-            self._pollhandle = pollhandle
+        if not self._poll_handle:
+            self._poll_handle = poll_handle
 
-        # sysfs never blocks on POLLIN and POLLOUT
         return select.POLLIN | select.POLLOUT | (select.POLLPRI if event else 0)
 
     def notify_poll(self):
-        if self._pollhandle:
+        if self._poll_handle:
             self._event = True
-            self.parent.parent.notify_poll(self._pollhandle)
-            self._pollhandle = None
+            pyfuse3.notify_poll(self._poll_handle)
+            self._poll_handle = None
 
 
 class Gpio(Directory):
@@ -559,8 +575,8 @@ class EventThread(Thread):
 
             readable, _, _ = select.select(fds, [], [], 60)
             for fd in readable:
+                # This just serves to interrupt polling.
                 if fd == self._rdfd:
-                    # This just serves to interrupt polling.
                     os.read(self._rdfd, 1024)
                     continue
 
@@ -644,10 +660,10 @@ class Root(Directory):
             if device.device_node:
                 self._add_chip(device)
 
-    def __init__(self, fuse):
-        Directory.__init__(self, None)
-        self.stat.st_nlink = 2
-        self._fuse = fuse
+    def __init__(self, mountpoint):
+        Directory.__init__(self, None, inode=pyfuse3.ROOT_INODE)
+        self._attr.st_nlink = 2
+        self._mountpoint = mountpoint
 
         self._ranges = RangeManager()
         self._evthread = EventThread()
@@ -669,92 +685,177 @@ class Root(Directory):
     def unwatch_gpio(self, request):
         self._evthread.unwatch_gpio(request)
 
-    def notify_poll(self, pollhandle):
-        self._fuse.NotifyPoll(pollhandle)
-
     @property
     def mountpoint(self):
-        return self._fuse.fuse_args.mountpoint
+        return self._mountpoint
 
 
-class GpioSysfsFuse(Fuse):
+class GpioSysFuse(pyfuse3.Operations):
 
-    def __init__(self):
-        Fuse.__init__(self)
+    async def lookup(self, parent_inode, name, ctx):
+        with _inode_lock:
+            parent = _inode_map.get(parent_inode)
+        if parent is None or not isinstance(parent, Directory):
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def main(self):
-        if not self.fuse_args.modifiers["showhelp"]:
-            self._root = Root(self)
+        name_str = name.decode()
+        child = parent.children.get(name_str)
+        if child is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-        Fuse.main(self)
+        return child.getattr()
 
-    def stop(self):
-        if hasattr(self, "_root"):
-            self._root.stop()
+    async def getattr(self, inode, ctx):
+        with _inode_lock:
+            entry = _inode_map.get(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def get_entry(self, path):
-        if path == "/":
-            return self._root
+        return entry.getattr()
 
-        return self._root.get_entry(os.path.normpath(path).split("/")[1:])
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        with _inode_lock:
+            entry = _inode_map.get(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def readdir(self, path, offset):
-        return self.get_entry(path).readdir(offset)
+        if fields.update_mode:
+            entry.chmod(attr.st_mode)
+        if fields.update_uid or fields.update_gid:
+            entry.chown(
+                attr.st_uid if fields.update_uid else entry.attr.st_uid,
+                attr.st_gid if fields.update_gid else entry.attr.st_gid,
+            )
 
-    def getattr(self, path):
-        return self.get_entry(path).getattr()
+        return entry.getattr()
 
-    def chmod(self, path, mode):
-        return self.get_entry(path).chmod(mode)
+    async def readlink(self, inode, ctx):
+        with _inode_lock:
+            entry = _inode_map.get(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def chown(self, path, uid, gid):
-        return self.get_entry(path).chown(uid, gid)
+        return entry.readlink()
 
-    def mknod(self, path, mode, dev):
-        return -errno.EACCES
+    async def opendir(self, inode, ctx):
+        with _inode_lock:
+            entry = _inode_map.get(inode)
+        if entry is None or not isinstance(entry, Directory):
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def mkdir(self, path, mode):
-        return -errno.EPERM
+        return inode
 
-    def rmdir(self, path):
-        return self.get_entry(path).rmdir(path)
+    async def readdir(self, fh, start_id, token):
+        with _inode_lock:
+            entry = _inode_map.get(fh)
+        if entry is None or not isinstance(entry, Directory):
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def unlink(self, path):
-        return -errno.EPERM
+        parent_inode = entry.parent.inode if entry.parent else fh
+        entries = [(b".", fh), (b"..", parent_inode)]
+        for name, child in list(entry.children.items()):
+            entries.append((name.encode(), child.inode))
 
-    def open(self, path, flags):
-        return self.get_entry(path).open(flags)
+        for idx, (name, child_inode) in enumerate(entries):
+            if idx < start_id:
+                continue
+            with _inode_lock:
+                child = _inode_map.get(child_inode)
+            if child is None:
+                continue
+            if not pyfuse3.readdir_reply(token, name, child.getattr(), idx + 1):
+                return
 
-    def read(self, path, size, offset):
-        return self.get_entry(path).read(size, offset)
+    async def releasedir(self, fh):
+        pass
 
-    def write(self, path, buf, offset):
-        return self.get_entry(path).write(buf, offset)
+    async def open(self, inode, flags, ctx):
+        with _inode_lock:
+            entry = _inode_map.get(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def poll(self, path, pollhandle):
-        return self.get_entry(path).poll(pollhandle)
+        entry.open(flags)
+        return pyfuse3.FileInfo(fh=inode)
 
-    def truncate(self, path, size):
-        return 0
+    async def read(self, fh, off, size):
+        with _inode_lock:
+            entry = _inode_map.get(fh)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def flush(self, path):
-        return 0
+        data = entry.read(size, off)
+        return data[off:off + size]
 
-    def readlink(self, path):
-        return self.get_entry(path).readlink()
+    async def write(self, fh, off, buf):
+        with _inode_lock:
+            entry = _inode_map.get(fh)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
 
-    def release(self, path, flags):
-        return 0
+        return entry.write(buf, off)
+
+    async def release(self, fh):
+        pass
+
+    async def flush(self, fh):
+        pass
+
+    async def fsync(self, fh, datasync):
+        pass
+
+    async def poll(self, fh, poll_handle):
+        with _inode_lock:
+            entry = _inode_map.get(fh)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        return entry.poll(poll_handle)
+
+    async def mknod(self, parent_inode, name, mode, rdev, ctx):
+        raise pyfuse3.FUSEError(errno.EACCES)
+
+    async def mkdir(self, parent_inode, name, mode, ctx):
+        raise pyfuse3.FUSEError(errno.EPERM)
+
+    async def rmdir(self, parent_inode, name, ctx):
+        raise pyfuse3.FUSEError(errno.EPERM)
+
+    async def unlink(self, parent_inode, name, ctx):
+        raise pyfuse3.FUSEError(errno.EPERM)
+
+    async def create(self, parent_inode, name, mode, flags, ctx):
+        raise pyfuse3.FUSEError(errno.EACCES)
 
 
 def main():
-    server = GpioSysfsFuse()
-    server.parse()
+    parser = argparse.ArgumentParser(description="GPIO sysfs FUSE proxy")
+    parser.add_argument("mountpoint", help="Filesystem mount point")
+    parser.add_argument(
+        "-o",
+        dest="options",
+        metavar="OPT",
+        action="append",
+        default=[],
+        help="FUSE mount options",
+    )
+    args = parser.parse_args()
+
+    root = Root(args.mountpoint)
+    fs = GpioSysFuse()
+
+    fuse_options = set(pyfuse3.default_options)
+    fuse_options.add("fsname=gpiod-sysfs-proxy")
+    for opt in args.options:
+        fuse_options.add(opt)
+
+    pyfuse3.init(fs, args.mountpoint, fuse_options)
 
     try:
-        server.main()
+        trio.run(pyfuse3.main)
     finally:
-        server.stop()
+        root.stop()
+        pyfuse3.close()
 
 
 if __name__ == "__main__":
