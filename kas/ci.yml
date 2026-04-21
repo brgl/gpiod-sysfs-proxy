@@ -4,6 +4,8 @@
 header:
   version: 14
 
+build_system: oe
+
 machine: qemux86-64
 distro: poky
 
