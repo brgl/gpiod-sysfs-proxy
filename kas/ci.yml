@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+header:
+  version: 14
+
+machine: qemux86-64
+distro: poky
+
+target: core-image-minimal
+
+repos:
+  poky:
+    url: https://git.yoctoproject.org/poky
+    branch: master
+    layers:
+      meta:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://github.com/openembedded/meta-openembedded
+    branch: master
+    layers:
+      meta-oe:
+      meta-python:
+      meta-networking:
+      meta-filesystems:
+
+local_conf_header:
+  features: |
+    EXTRA_IMAGE_FEATURES = "allow-empty-password empty-root-password allow-root-login"
+    EXTRA_IMAGE_FEATURES += "ptest-pkgs"
+
+    DISTRO_FEATURES = "ipv4 xattr zeroconf ldconfig"
+    DISTRO_FEATURES:append = " ptest"
+
+    INIT_MANAGER = "systemd"
+
+  kernel: |
+    KERNEL_FEATURES:append = " \
+        features/gpio/sim.scc \
+        features/gpio/mockup.scc \
+        features/gpio/sysfs.scc \
+        features/overlayfs/overlayfs.scc \
+    "
+
+  packages: |
+    IMAGE_INSTALL:append = " \
+        kernel-module-gpio-sim \
+        kernel-module-gpio-mockup \
+        kernel-module-configfs \
+    "
+
+    IMAGE_INSTALL:append = " libgpiod libgpiodcxx libgpiod-tools"
+    IMAGE_INSTALL:append = " libgpiod-manager libgpiod-cli"
+
+    PACKAGECONFIG:append:pn-libgpiod = " glib"
+    PACKAGECONFIG:append:pn-libgpiod = " dbus"
+
+    IMAGE_INSTALL:append = " python3-gpiod"
+
+    IMAGE_INSTALL:append = " gpiod-sysfs-proxy"
+    PACKAGECONFIG:append:pn-gpiod-sysfs-proxy = " sys-class-mount"
+
+    IMAGE_INSTALL:append = " openssh-server"
+
+  build: |
+    # Fixed paths so the GitHub Actions cache keys are stable across runs.
+    DL_DIR = "/home/runner/yocto-downloads"
+    SSTATE_DIR = "/home/runner/yocto-sstate"
+
+    BB_NUMBER_THREADS = "4"
+    PARALLEL_MAKE = "-j4"
