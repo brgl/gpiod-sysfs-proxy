@@ -497,7 +497,10 @@ class ValueAttr(RwAttrWithVal):
             raise ValueError
 
         val = Value.INACTIVE if buf == "0" else Value.ACTIVE
-        self.parent.set_value(val)
+        try:
+            self.parent.set_value(val)
+        except OSError:
+            raise pyfuse3.FUSEError(errno.EPERM)
 
     def poll(self, poll_handle):
         event = self._event
@@ -509,8 +512,8 @@ class ValueAttr(RwAttrWithVal):
         return select.POLLIN | select.POLLOUT | (select.POLLPRI if event else 0)
 
     def notify_poll(self):
+        self._event = True
         if self._poll_handle:
-            self._event = True
             pyfuse3.notify_poll(self._poll_handle)
             self._poll_handle = None
 
@@ -822,7 +825,17 @@ class GpioSysFuse(pyfuse3.Operations):
         raise pyfuse3.FUSEError(errno.EPERM)
 
     async def rmdir(self, parent_inode, name, ctx):
-        raise pyfuse3.FUSEError(errno.EPERM)
+        with _inode_lock:
+            parent = _inode_map.get(parent_inode)
+        if parent is None or not isinstance(parent, Directory):
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        name_str = name.decode()
+        child = parent.children.get(name_str)
+        if child is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        child.rmdir()
 
     async def unlink(self, parent_inode, name, ctx):
         raise pyfuse3.FUSEError(errno.EPERM)
