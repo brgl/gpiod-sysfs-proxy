@@ -23,6 +23,9 @@ _inode_lock = Lock()
 _inode_counter = pyfuse3.ROOT_INODE + 1
 _inode_map = {}
 
+_entry_timeout = 300.0
+_attr_timeout = 300.0
+
 
 def _alloc_inode(entry):
     global _inode_counter
@@ -119,8 +122,8 @@ class Entry:
         self._attr.st_ctime_ns = now_ns
         self._attr.st_rdev = 0
         self._attr.generation = 0
-        self._attr.entry_timeout = 300
-        self._attr.attr_timeout = 300
+        self._attr.entry_timeout = _entry_timeout
+        self._attr.attr_timeout = _attr_timeout
 
     @property
     def inode(self):
@@ -829,8 +832,16 @@ class GpioSysFuse(pyfuse3.Operations):
 
 
 def main():
+    global _entry_timeout, _attr_timeout
+
     parser = argparse.ArgumentParser(description="GPIO sysfs FUSE proxy")
     parser.add_argument("mountpoint", help="Filesystem mount point")
+    parser.add_argument(
+        "-f",
+        "--foreground",
+        action="store_true",
+        help=argparse.SUPPRESS,  # pyfuse3 always runs in the foreground
+    )
     parser.add_argument(
         "-o",
         dest="options",
@@ -841,13 +852,20 @@ def main():
     )
     args = parser.parse_args()
 
-    root = Root(args.mountpoint)
-    fs = GpioSysFuse()
-
     fuse_options = set(pyfuse3.default_options)
     fuse_options.add("fsname=gpiod-sysfs-proxy")
     for opt in args.options:
-        fuse_options.add(opt)
+        if opt == "nonempty":
+            pass  # removed in FUSE 3; mounting over non-empty dirs is always allowed
+        elif opt.startswith("entry_timeout="):
+            _entry_timeout = float(opt.split("=", 1)[1])
+        elif opt.startswith("attr_timeout="):
+            _attr_timeout = float(opt.split("=", 1)[1])
+        else:
+            fuse_options.add(opt)
+
+    root = Root(args.mountpoint)
+    fs = GpioSysFuse()
 
     pyfuse3.init(fs, args.mountpoint, fuse_options)
 
