@@ -512,8 +512,8 @@ class ValueAttr(RwAttrWithVal):
         return select.POLLIN | select.POLLOUT | (select.POLLPRI if event else 0)
 
     def notify_poll(self):
-        self._event = True
         if self._poll_handle:
+            self._event = True
             pyfuse3.notify_poll(self._poll_handle)
             self._poll_handle = None
 
@@ -544,15 +544,20 @@ class Gpio(Directory):
         self._handle.release()
 
     def reconfigure(self):
-        self._handle.reconfigure_lines(
-            {
+        self.parent.unwatch_gpio(self._handle)
+        old_handle = self._handle
+        self._handle = self._chip._handle.request_lines(
+            consumer="sysfs",
+            config={
                 self._offset: gpiod.LineSettings(
                     direction=self.children["direction"].value,
                     edge_detection=self.children["edge"].value,
                     active_low=self.children["active_low"].value,
                 )
-            }
+            },
         )
+        old_handle.release()
+        self.parent.watch_gpio(self._handle, self.children["value"])
 
     def get_value(self):
         return self._handle.get_values()[0]
@@ -782,7 +787,7 @@ class GpioSysFuse(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.ENOENT)
 
         entry.open(flags)
-        return pyfuse3.FileInfo(fh=inode)
+        return pyfuse3.FileInfo(fh=inode, direct_io=isinstance(entry, ValueAttr))
 
     async def read(self, fh, off, size):
         with _inode_lock:
