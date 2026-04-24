@@ -4,7 +4,7 @@
 header:
   version: 14
 
-build_system: oe
+#build_system: oe
 
 machine: qemux86-64
 distro: poky
@@ -14,14 +14,14 @@ target: core-image-minimal
 repos:
   poky:
     url: https://git.yoctoproject.org/poky
-    branch: master
+    branch: scarthgap
     layers:
       meta:
       meta-poky:
 
   meta-openembedded:
     url: https://github.com/openembedded/meta-openembedded
-    branch: master
+    branch: scarthgap
     layers:
       meta-oe:
       meta-python:
