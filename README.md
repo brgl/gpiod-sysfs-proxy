@@ -96,5 +96,5 @@ TODO
 
 Then build the image:
 ```
-kas-container build kas/ci.yml
+kas-container build tests/yocto/gpiod-sysfs-proxy-tests.yml
 ```
