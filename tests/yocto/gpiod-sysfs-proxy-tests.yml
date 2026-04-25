@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+header:
+  version: 14
+
+machine: qemux86-64
+distro: poky
+
+target: core-image-minimal
+
+repos:
+  bitbake:
+    url: https://git.openembedded.org/bitbake
+    branch: master
+    path: bitbake
+    layers:
+      .: disabled
+
+  openembedded-core:
+    url: https://git.openembedded.org/openembedded-core
+    branch: master
+    path: openembedded-core
+    layers:
+      meta:
+
+  meta-yocto:
+    url: https://git.yoctoproject.org/meta-yocto
+    branch: master
+    path: meta-yocto
+    layers:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    branch: master
+    path: meta-openembedded
+    layers:
+      meta-oe:
+      meta-python:
+      meta-networking:
+      meta-filesystems:
+
+  # TODO: See if we can add the source here rather than mounting via 9pfs ?
+  gpiod-sysfs-proxy:
+    path: .
+    layers:
+      tests/yocto:
+
+local_conf_header:
+  features: |
+    EXTRA_IMAGE_FEATURES = "allow-empty-password empty-root-password allow-root-login"
+    EXTRA_IMAGE_FEATURES += "ptest-pkgs"
+
+    DISTRO_FEATURES = "ipv4 xattr zeroconf ldconfig"
+    DISTRO_FEATURES:append = " ptest"
+
+    INIT_MANAGER = "systemd"
+
+  kernel: |
+    KERNEL_FEATURES:append = " \
+        features/gpio/sim.scc \
+        features/gpio/mockup.scc \
+        features/gpio/sysfs.scc \
+        features/overlayfs/overlayfs.scc \
+    "
+
+  packages: |
+    IMAGE_INSTALL:append = " \
+        kernel-module-gpio-sim \
+        kernel-module-gpio-mockup \
+        kernel-module-configfs \
+    "
+
+    IMAGE_INSTALL:append = " libgpiod libgpiodcxx libgpiod-tools"
+    #IMAGE_INSTALL:append = " libgpiod-cli"
+
+    #PACKAGECONFIG:append:pn-libgpiod = " glib"
+    #PACKAGECONFIG:append:pn-libgpiod = " dbus"
+
+    #IMAGE_INSTALL:append = " python3-gpiod"
+
+    # TODO: make it install the source from this repo
+    IMAGE_INSTALL:append = " gpiod-sysfs-proxy"
+    PACKAGECONFIG:append:pn-gpiod-sysfs-proxy = " sys-class-mount"
+
+    IMAGE_INSTALL:append = " ptest-runner"
+
+    IMAGE_FEATURES += "ssh-server-openssh"
+
+  qemu-virtfs: |
+    PACKAGECONFIG:append:pn-qemu-system-native = " virtfs"
+
+  build: |
+    # TODO: remove this; it was for github actions
+    # Fixed paths so the GitHub Actions cache keys are stable across runs.
+    #DL_DIR = "/home/runner/yocto-downloads"
+    #SSTATE_DIR = "/home/runner/yocto-sstate"
+    DL_DIR = "${TOPDIR}/../downloads"
+    SSTATE_DIR = "${TOPDIR}/../sstate-cache"
+
+    # TODO: remove this; it was for github actions
+    #BB_NUMBER_THREADS = "4"
+    #PARALLEL_MAKE = "-j4"
