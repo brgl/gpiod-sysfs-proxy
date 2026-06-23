@@ -9,7 +9,8 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.6.0"
 dependencies = [
-  "fuse-python>=1.0.9",
+  "pyfuse3>=3.5.0",
+  "trio>=0.22.0",
   "gpiod>=2.1.0",
   "pyudev>=0.24.0"
 ]

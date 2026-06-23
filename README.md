@@ -19,13 +19,11 @@ switches for foreground or debug operation respectively.
 The recommended command-line mount options to use are:
 
 ```
-gpiod-sysfs-proxy <mountpoint> -o nonempty -o allow_other -o default_permissions -o entry_timeout=0
+gpiod-sysfs-proxy <mountpoint> -o allow_other -o default_permissions
 ```
 
-This allows to mount the compatibility layer on non-empty `/sys/class/gpio`,
-allows non-root users to access it, enables permission checks by the kernel
-and disables caching of entry stats (for when we remove directories from the
-script while the kernel doesn't know it).
+This allows non-root users to access the filesystem and enables permission
+checks by the kernel.
 
 For a complete list of available command-line options, please run:
 
