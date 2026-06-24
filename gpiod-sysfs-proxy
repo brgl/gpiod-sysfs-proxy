@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 # SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+# SPDX-FileCopyrightText: 2026 Qualcomm Technologies, Inc. and/or its subsidiaries
 
 import errno
 import os
@@ -10,15 +11,26 @@ import stat
 import sys
 import time
 import traceback
+from argparse import ArgumentParser
 from threading import Lock, Thread
 
-import fuse
+import pyfuse3
+import trio
 import gpiod
 import pyudev
-from fuse import Direntry, Fuse, Stat
-from gpiod.line import Direction, Edge, Value
 
-fuse.fuse_python_api = (0, 2)
+from pyfuse3 import (
+    EntryAttributes,
+    FileHandleT,
+    FileInfo,
+    FUSEError,
+    InodeT,
+    PollHandle,
+    ReaddirToken,
+    RequestContext,
+    SetattrFields,
+)
+from gpiod.line import Direction, Edge, Value
 
 
 class Range:
@@ -82,79 +94,104 @@ class RangeManager:
         raise ValueError(f"Range not found for base {base}")
 
 
+_inode_counter = pyfuse3.ROOT_INODE
+
+
+def _alloc_inode():
+    global _inode_counter
+    _inode_counter += 1
+    return InodeT(_inode_counter)
+
+
+_now_ns = int(time.time() * 1e9)
+
+
+def _make_entry_attr(mode, nlink, size=4096):
+    attr = EntryAttributes()
+    attr.st_ino = _alloc_inode()
+    attr.st_mode = mode
+    attr.st_nlink = nlink
+    attr.st_uid = 0
+    attr.st_gid = 0
+    attr.st_rdev = 0
+    attr.st_size = size
+    attr.st_blksize = 512
+    attr.st_blocks = (size + 511) // 512
+    attr.st_atime_ns = _now_ns
+    attr.st_mtime_ns = _now_ns
+    attr.st_ctime_ns = _now_ns
+    attr.generation = 0
+    attr.entry_timeout = 0
+    attr.attr_timeout = 0
+    return attr
+
+
 class Entry:
 
     def __init__(self, parent):
         self._parent = parent
-        self._stat = Stat()
-        self.stat.st_atime = self.stat.st_ctime = self.stat.st_mtime = time.time()
+        self._attr = self._make_attr()
 
-    def get_entry(self, tokens):
+    def _make_attr(self):
         raise NotImplementedError
 
-    def readdir(self, offset):
-        raise NotImplementedError
+    def lookup(self, name):
+        raise FUSEError(errno.ENOENT)
 
-    def getattr(self):
-        return self.stat
+    def readdir(self):
+        raise FUSEError(errno.ENOTDIR)
 
     def open(self, flags):
-        raise NotImplementedError
+        raise FUSEError(errno.ENOENT)
 
-    def read(self, size, offset):
-        raise NotImplementedError
+    def read(self, fh, offset, size):
+        raise FUSEError(errno.EBADF)
 
-    def write(self, buf, offset):
-        return -errno.EPERM
+    def write(self, fh, offset, buf):
+        raise FUSEError(errno.EPERM)
 
-    def poll(self, pollhandle):
-        raise NotImplementedError
+    def poll(self, fh, pollhandle):
+        raise FUSEError(errno.ENOSYS)
 
     def readlink(self):
-        raise NotImplementedError
+        raise FUSEError(errno.EINVAL)
 
-    def rmdir(self, path):
-        return -errno.EPERM
+    def rmdir(self, name):
+        raise FUSEError(errno.EPERM)
 
     def chmod(self, mode):
-        self.stat.st_mode = mode
-        return 0
+        self._attr.st_mode = mode
+        return self._attr
 
     def chown(self, uid, gid):
-        self.stat.st_uid = uid
-        self.stat.st_gid = gid
-        return 0
+        self._attr.st_uid = uid
+        self._attr.st_gid = gid
+        return self._attr
+
+    def truncate(self, size):
+        return self._attr
 
     @property
     def parent(self):
         return self._parent
 
     @property
-    def stat(self):
-        return self._stat
+    def attr(self):
+        return self._attr
 
-
-class NoEntry:
-
-    def readdir(self, offset):
-        return -errno.ENOENT
-
-    def getattr(self):
-        return -errno.ENOENT
-
-    def open(self, flags):
-        return -errno.ENOENT
-
-    def readlink(self):
-        return -errno.EPERM
+    @property
+    def inode(self):
+        return self._attr.st_ino
 
 
 class Directory(Entry):
 
     def __init__(self, parent):
+        self._children = dict()
         Entry.__init__(self, parent)
 
-        self.stat.st_mode = (
+    def _make_attr(self):
+        return _make_entry_attr(
             stat.S_IFDIR
             | stat.S_IRUSR
             | stat.S_IWUSR
@@ -162,28 +199,20 @@ class Directory(Entry):
             | stat.S_IRGRP
             | stat.S_IXGRP
             | stat.S_IROTH
-            | stat.S_IXOTH
+            | stat.S_IXOTH,
+            1,
         )
 
-        self.stat.st_nlink = 1
+    def lookup(self, name):
+        if name in self._children:
+            return self._children[name]
+        raise FUSEError(errno.ENOENT)
 
-        self._children = dict()
+    def readdir(self):
+        return list(self._children.items())
 
-    def get_entry(self, tokens):
-        if tokens[0] in self._children:
-            if len(tokens) > 1:
-                return self._children[tokens[0]].get_entry(tokens[1:])
-
-            return self._children[tokens[0]]
-
-        return NoEntry()
-
-    def readdir(self, offset):
-        for name in [".", ".."] + list(self._children.keys()):
-            yield Direntry(name)
-
-    def rmdir(self, path):
-        return -errno.ENOTDIR
+    def rmdir(self, name):
+        raise FUSEError(errno.ENOTDIR)
 
     @property
     def children(self):
@@ -192,44 +221,45 @@ class Directory(Entry):
 
 class Attribute(Entry):
 
-    def __init__(self, parent):
-        Entry.__init__(self, parent)
-
-        self.stat.st_mode = stat.S_IFREG
-        self.stat.st_nlink = 1
-        self.stat.st_size = 4096
+    def _make_attr(self):
+        return _make_entry_attr(stat.S_IFREG, 1)
 
     def open(self, flags):
-        return 0
+        return None
 
 
 class ConstRoAttr(Attribute):
 
     def __init__(self, parent, value):
-        Attribute.__init__(self, parent)
         self._value = value
-        self.stat.st_mode = self.stat.st_mode | (
-            stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
-        )
+        Attribute.__init__(self, parent)
 
-    def read(self, size, offset):
-        return f"{self._value}\n".encode()
+    def _make_attr(self):
+        a = _make_entry_attr(
+            stat.S_IFREG | stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH, 1
+        )
+        return a
+
+    def read(self, fh, offset, size):
+        data = f"{self._value}\n".encode()
+        return data[offset : offset + size]
 
 
 class RwAttr(Attribute):
 
-    def __init__(self, parent):
-        Attribute.__init__(self, parent)
-        self.stat.st_mode = self.stat.st_mode | (
-            stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
+    def _make_attr(self):
+        return _make_entry_attr(
+            stat.S_IFREG | stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH,
+            1,
         )
 
-    def write(self, buf, offset):
+    def write(self, fh, offset, buf):
         try:
             self.do_write(buf.strip().decode())
+        except FUSEError:
+            raise
         except ValueError:
-            return -errno.EINVAL
-
+            raise FUSEError(errno.EINVAL)
         return len(buf)
 
     def do_write(self, buf):
@@ -239,11 +269,11 @@ class RwAttr(Attribute):
 class Link(Entry):
 
     def __init__(self, parent, path):
+        self._path = path
         Entry.__init__(self, parent)
 
-        self._path = path
-
-        self.stat.st_mode = (
+    def _make_attr(self):
+        return _make_entry_attr(
             stat.S_IFLNK
             | stat.S_IRUSR
             | stat.S_IWUSR
@@ -251,22 +281,19 @@ class Link(Entry):
             | stat.S_IRGRP
             | stat.S_IXGRP
             | stat.S_IROTH
-            | stat.S_IXOTH
+            | stat.S_IXOTH,
+            2,
+            0,
         )
 
-        self.stat.st_nlink = 2
-        self.stat.st_size = 0
-
     def readlink(self):
-        return self._path
+        return self._path.encode()
 
 
 class ExportBase(RwAttr):
 
-    def __init__(self, parent):
-        RwAttr.__init__(self, parent)
-        # export/unexport attributes are more restrictive than other rw ones
-        self.stat.st_mode = stat.S_IFREG | stat.S_IWUSR
+    def _make_attr(self):
+        return _make_entry_attr(stat.S_IFREG | stat.S_IWUSR, 1)
 
     def do_write(self, buf):
         if not buf.isdigit():
@@ -274,9 +301,6 @@ class ExportBase(RwAttr):
 
 
 class Export(ExportBase):
-
-    def __init__(self, parent):
-        ExportBase.__init__(self, parent)
 
     def do_write(self, buf):
         ExportBase.do_write(self, buf)
@@ -289,15 +313,12 @@ class Export(ExportBase):
 
             if entry.has_gpio(gpio):
                 entry.request(gpio)
-                return None
+                return
 
         raise ValueError
 
 
 class Unexport(ExportBase):
-
-    def __init__(self, parent):
-        ExportBase.__init__(self, parent)
 
     def do_write(self, buf):
         ExportBase.do_write(self, buf)
@@ -319,10 +340,7 @@ class UeventAttr(RwAttr):
     VARS = "(\\s+[A-Za-z0-9_]+\\=[A-Za-z0-9_]+)*"
     PATTERN = f"^{CMDS}\\s+{UUID}{VARS}$"
 
-    def __init__(self, parent):
-        RwAttr.__init__(self, parent)
-
-    def read(self, size, offset):
+    def read(self, fh, offset, size):
         return b""
 
     def do_write(self, buf):
@@ -347,11 +365,7 @@ class Gpiochip(Directory):
         self.children["subsystem"] = Link(self, self.parent.mountpoint)
 
     def has_gpio(self, gpio):
-        return (
-            True
-            if gpio >= self._base and gpio < (self._base + self._info.num_lines)
-            else False
-        )
+        return gpio >= self._base and gpio < (self._base + self._info.num_lines)
 
     def request(self, gpio):
         offset = gpio - self._base
@@ -380,8 +394,8 @@ class Gpiochip(Directory):
 class RwAttrWithVal(RwAttr):
 
     def __init__(self, parent, init_val):
-        RwAttr.__init__(self, parent)
         self._value = init_val
+        RwAttr.__init__(self, parent)
 
     @property
     def value(self):
@@ -394,12 +408,10 @@ class RwAttrWithVal(RwAttr):
 
 class DirectionAttr(RwAttrWithVal):
 
-    def __init__(self, parent, init_val):
-        RwAttrWithVal.__init__(self, parent, init_val)
-
-    def read(self, size, offset):
+    def read(self, fh, offset, size):
         dirstr = "in" if self.value == Direction.INPUT else "out"
-        return f"{dirstr}\n".encode()
+        data = f"{dirstr}\n".encode()
+        return data[offset : offset + size]
 
     def do_write(self, buf):
         if buf == "in":
@@ -414,10 +426,7 @@ class DirectionAttr(RwAttrWithVal):
 
 class EdgeAttr(RwAttrWithVal):
 
-    def __init__(self, parent, init_val):
-        RwAttrWithVal.__init__(self, parent, init_val)
-
-    def read(self, size, offset):
+    def read(self, fh, offset, size):
         if self.value == Edge.RISING:
             edgestr = "rising"
         elif self.value == Edge.FALLING:
@@ -427,7 +436,8 @@ class EdgeAttr(RwAttrWithVal):
         else:
             edgestr = "none"
 
-        return f"{edgestr}\n".encode()
+        data = f"{edgestr}\n".encode()
+        return data[offset : offset + size]
 
     def do_write(self, buf):
         if buf == "none":
@@ -446,12 +456,10 @@ class EdgeAttr(RwAttrWithVal):
 
 class ActiveLowAttr(RwAttrWithVal):
 
-    def __init__(self, parent, init_val):
-        RwAttrWithVal.__init__(self, parent, init_val)
-
-    def read(self, size, offset):
+    def read(self, fh, offset, size):
         val = "1" if self.value else "0"
-        return f"{val}\n".encode()
+        data = f"{val}\n".encode()
+        return data[offset : offset + size]
 
     def do_write(self, buf):
         if not buf.isdigit():
@@ -468,31 +476,33 @@ class ValueAttr(RwAttrWithVal):
         self._event = False
         self._pollhandle = None
 
-    def read(self, size, offset):
+    def read(self, fh, offset, size):
         val = "1" if self.parent.get_value() == Value.ACTIVE else "0"
-        return f"{val}\n".encode()
+        data = f"{val}\n".encode()
+        return data[offset : offset + size]
 
     def do_write(self, buf):
         if not buf.isdigit():
             raise ValueError
 
         val = Value.INACTIVE if buf == "0" else Value.ACTIVE
-        self.parent.set_value(val)
+        try:
+            self.parent.set_value(val)
+        except PermissionError:
+            raise FUSEError(errno.EPERM)
 
-    def poll(self, pollhandle):
+    def poll(self, fh, pollhandle):
         event = self._event
         self._event = False
-
-        if not self._pollhandle:
+        if pollhandle is not None:
             self._pollhandle = pollhandle
-
-        # sysfs never blocks on POLLIN and POLLOUT
+        # sysfs never blocks on POLLIN and POLLOUT; raise POLLPRI on edge event
         return select.POLLIN | select.POLLOUT | (select.POLLPRI if event else 0)
 
     def notify_poll(self):
         if self._pollhandle:
             self._event = True
-            self.parent.parent.notify_poll(self._pollhandle)
+            self._pollhandle.notify()
             self._pollhandle = None
 
 
@@ -560,7 +570,6 @@ class EventThread(Thread):
             readable, _, _ = select.select(fds, [], [], 60)
             for fd in readable:
                 if fd == self._rdfd:
-                    # This just serves to interrupt polling.
                     os.read(self._rdfd, 1024)
                     continue
 
@@ -597,6 +606,21 @@ class EventThread(Thread):
 
 
 class Root(Directory):
+
+    def _make_attr(self):
+        a = _make_entry_attr(
+            stat.S_IFDIR
+            | stat.S_IRUSR
+            | stat.S_IWUSR
+            | stat.S_IXUSR
+            | stat.S_IRGRP
+            | stat.S_IXGRP
+            | stat.S_IROTH
+            | stat.S_IXOTH,
+            2,
+        )
+        a.st_ino = pyfuse3.ROOT_INODE
+        return a
 
     def _add_chip(self, device):
         chip = gpiod.Chip(device.device_node)
@@ -644,10 +668,10 @@ class Root(Directory):
             if device.device_node:
                 self._add_chip(device)
 
-    def __init__(self, fuse):
+    def __init__(self, mountpoint):
         Directory.__init__(self, None)
-        self.stat.st_nlink = 2
-        self._fuse = fuse
+        self._attr.st_nlink = 2
+        self._mountpoint = mountpoint
 
         self._ranges = RangeManager()
         self._evthread = EventThread()
@@ -669,92 +693,225 @@ class Root(Directory):
     def unwatch_gpio(self, request):
         self._evthread.unwatch_gpio(request)
 
-    def notify_poll(self, pollhandle):
-        self._fuse.NotifyPoll(pollhandle)
-
     @property
     def mountpoint(self):
-        return self._fuse.fuse_args.mountpoint
+        return self._mountpoint
 
 
-class GpioSysfsFuse(Fuse):
+class GpioSysfsOperations(pyfuse3.Operations):
 
-    def __init__(self):
-        Fuse.__init__(self)
-
-    def main(self):
-        if not self.fuse_args.modifiers["showhelp"]:
-            self._root = Root(self)
-
-        Fuse.main(self)
+    def __init__(self, mountpoint):
+        super().__init__()
+        self._root = Root(mountpoint)
+        self._inode_map = {pyfuse3.ROOT_INODE: self._root}
+        self._fh_map = {}
+        self._fh_counter = 0
 
     def stop(self):
-        if hasattr(self, "_root"):
-            self._root.stop()
+        self._root.stop()
 
-    def get_entry(self, path):
-        if path == "/":
-            return self._root
+    def _alloc_fh(self, entry):
+        self._fh_counter += 1
+        fh = FileHandleT(self._fh_counter)
+        self._fh_map[fh] = entry
+        return fh
 
-        return self._root.get_entry(os.path.normpath(path).split("/")[1:])
+    def _get_entry_by_inode(self, inode):
+        entry = self._inode_map.get(inode)
+        if entry is None:
+            raise FUSEError(errno.ENOENT)
+        return entry
 
-    def readdir(self, path, offset):
-        return self.get_entry(path).readdir(offset)
+    def _register_tree(self, entry):
+        """Register entry and all its descendants in the inode map."""
+        self._inode_map[entry.inode] = entry
+        if isinstance(entry, Directory):
+            for child in entry.children.values():
+                self._register_tree(child)
 
-    def getattr(self, path):
-        return self.get_entry(path).getattr()
+    def _lookup_and_register(self, parent_entry, name):
+        child = parent_entry.lookup(name)
+        # Register child and descendants (handles newly exported GPIOs)
+        self._register_tree(child)
+        return child
 
-    def chmod(self, path, mode):
-        return self.get_entry(path).chmod(mode)
+    async def lookup(self, parent_inode, name, ctx):
+        parent = self._get_entry_by_inode(parent_inode)
+        name_str = name.decode()
+        child = self._lookup_and_register(parent, name_str)
+        attr = EntryAttributes()
+        self._copy_attr(child.attr, attr)
+        return attr
 
-    def chown(self, path, uid, gid):
-        return self.get_entry(path).chown(uid, gid)
+    def _copy_attr(self, src, dst):
+        for field in (
+            "st_ino",
+            "st_mode",
+            "st_nlink",
+            "st_uid",
+            "st_gid",
+            "st_rdev",
+            "st_size",
+            "st_blksize",
+            "st_blocks",
+            "st_atime_ns",
+            "st_mtime_ns",
+            "st_ctime_ns",
+        ):
+            setattr(dst, field, getattr(src, field))
+        dst.generation = 0
+        dst.entry_timeout = 0
+        dst.attr_timeout = 0
 
-    def mknod(self, path, mode, dev):
-        return -errno.EACCES
+    async def getattr(self, inode, ctx=None):
+        entry = self._get_entry_by_inode(inode)
+        attr = EntryAttributes()
+        self._copy_attr(entry.attr, attr)
+        return attr
 
-    def mkdir(self, path, mode):
-        return -errno.EPERM
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        entry = self._get_entry_by_inode(inode)
 
-    def rmdir(self, path):
-        return self.get_entry(path).rmdir(path)
+        if fields.update_mode:
+            entry.chmod(attr.st_mode)
+        if fields.update_uid or fields.update_gid:
+            uid = attr.st_uid if fields.update_uid else entry.attr.st_uid
+            gid = attr.st_gid if fields.update_gid else entry.attr.st_gid
+            entry.attr.st_uid = uid
+            entry.attr.st_gid = gid
+        if fields.update_size:
+            entry.truncate(attr.st_size)
 
-    def unlink(self, path):
-        return -errno.EPERM
+        result = EntryAttributes()
+        self._copy_attr(entry.attr, result)
+        return result
 
-    def open(self, path, flags):
-        return self.get_entry(path).open(flags)
+    async def readlink(self, inode, ctx):
+        entry = self._get_entry_by_inode(inode)
+        return entry.readlink()
 
-    def read(self, path, size, offset):
-        return self.get_entry(path).read(size, offset)
+    async def opendir(self, inode, ctx):
+        entry = self._get_entry_by_inode(inode)
+        if not isinstance(entry, Directory):
+            raise FUSEError(errno.ENOTDIR)
+        return FileHandleT(inode)
 
-    def write(self, path, buf, offset):
-        return self.get_entry(path).write(buf, offset)
+    async def readdir(self, fh, start_id, token):
+        entry = self._get_entry_by_inode(InodeT(fh))
+        children = entry.readdir()
 
-    def poll(self, path, pollhandle):
-        return self.get_entry(path).poll(pollhandle)
+        # Build list of (name, child_entry) sorted by child inode for stable ordering
+        entries = []
+        for name, child in children:
+            self._register_tree(child)
+            entries.append((child.inode, name, child))
 
-    def truncate(self, path, size):
-        return 0
+        entries.sort(key=lambda x: x[0])
 
-    def flush(self, path):
-        return 0
+        for ino, name, child in entries:
+            if ino <= start_id:
+                continue
+            attr = EntryAttributes()
+            self._copy_attr(child.attr, attr)
+            if not pyfuse3.readdir_reply(token, name.encode(), attr, ino):
+                break
 
-    def readlink(self, path):
-        return self.get_entry(path).readlink()
+    async def open(self, inode, flags, ctx):
+        entry = self._get_entry_by_inode(inode)
+        entry.open(flags)
+        fh = self._alloc_fh(entry)
+        return FileInfo(fh=fh, direct_io=True)
 
-    def release(self, path, flags):
-        return 0
+    async def read(self, fh, offset, size):
+        entry = self._fh_map.get(fh)
+        if entry is None:
+            raise FUSEError(errno.EBADF)
+        return entry.read(fh, offset, size)
+
+    async def write(self, fh, offset, buf):
+        entry = self._fh_map.get(fh)
+        if entry is None:
+            raise FUSEError(errno.EBADF)
+        return entry.write(fh, offset, buf)
+
+    async def release(self, fh):
+        self._fh_map.pop(fh, None)
+
+    async def releasedir(self, fh):
+        pass
+
+    async def flush(self, fh):
+        pass
+
+    async def poll(self, inode, fh, poll_handle, ctx):
+        entry = self._fh_map.get(fh)
+        if entry is None:
+            raise FUSEError(errno.EBADF)
+        return entry.poll(fh, poll_handle)
+
+    async def mknod(self, parent_inode, name, mode, rdev, ctx):
+        raise FUSEError(errno.EACCES)
+
+    async def mkdir(self, parent_inode, name, mode, ctx):
+        raise FUSEError(errno.EPERM)
+
+    async def rmdir(self, parent_inode, name, ctx):
+        parent = self._get_entry_by_inode(parent_inode)
+        parent.rmdir(name.decode())
+
+    async def unlink(self, parent_inode, name, ctx):
+        raise FUSEError(errno.EPERM)
+
+    async def statfs(self, ctx):
+        data = pyfuse3.StatvfsData()
+        data.f_bsize = 4096
+        data.f_frsize = 4096
+        data.f_blocks = 0
+        data.f_bfree = 0
+        data.f_bavail = 0
+        data.f_files = len(self._inode_map)
+        data.f_ffree = 0
+        data.f_favail = 0
+        data.f_namemax = 255
+        return data
+
+
+def parse_args():
+    parser = ArgumentParser(description="User-space GPIO sysfs proxy")
+    parser.add_argument("mountpoint", help="Mount point")
+    parser.add_argument("-f", "--foreground", action="store_true", default=False)
+    parser.add_argument("-o", "--options", action="append", default=[])
+    parser.add_argument("-d", "--debug-fuse", action="store_true", default=False)
+    return parser.parse_args()
 
 
 def main():
-    server = GpioSysfsFuse()
-    server.parse()
+    args = parse_args()
+
+    fuse_options = set(pyfuse3.default_options)
+    fuse_options.add("fsname=gpiod-sysfs-proxy")
+
+    for opt_group in args.options:
+        for opt in opt_group.split(","):
+            opt = opt.strip()
+            if opt:
+                fuse_options.add(opt)
+
+    if args.debug_fuse:
+        fuse_options.add("debug")
+
+    ops = GpioSysfsOperations(args.mountpoint)
+    pyfuse3.init(ops, args.mountpoint, fuse_options)
 
     try:
-        server.main()
-    finally:
-        server.stop()
+        trio.run(pyfuse3.main)
+    except Exception:
+        pyfuse3.close(unmount=False)
+        ops.stop()
+        raise
+
+    pyfuse3.close()
+    ops.stop()
 
 
 if __name__ == "__main__":
