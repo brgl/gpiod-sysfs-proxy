@@ -31,6 +31,47 @@ For a complete list of available command-line options, please run:
 gpiod-sysfs-proxy --help
 ```
 
+## Integration
+
+### systemd
+
+The package installs a systemd template unit:
+
+```
+gpiod-sysfs-proxy@.service
+```
+
+No instance is enabled by default. The instance name is the
+systemd-escaped mountpoint. To expose the compatibility filesystem at
+`/run/gpio`:
+
+```
+systemctl enable --now gpiod-sysfs-proxy@run-gpio.service
+```
+
+or, to mount over `/sys/class/gpio` (only works when that directory already
+exists, i.e. the kernel sysfs GPIO interface is enabled):
+
+```
+systemctl enable --now gpiod-sysfs-proxy@sys-class-gpio.service
+```
+
+You can generate the escaped instance name for any path with:
+
+```
+systemd-escape --path /run/gpio
+systemd-escape --path /sys/class/gpio
+```
+
+The `sys-class-gpio` instance also works on a kernel where sysfs GPIO support
+is disabled (so `/sys/class/gpio` does not exist): an instance-specific drop-in
+pulls in the bundled `run-gpio-sys.mount` and `sys-class.mount` units, which
+overlay the missing `gpio` directory onto `/sys/class` before the proxy starts
+and tear it back down when the instance is stopped. Nothing else enables those
+mounts, and they are skipped when `/sys/class/gpio` already exists. See the
+[Non-existent `/sys/class/gpio`](#non-existent-sysclassgpio) caveat below for
+the underlying mechanism.
+
 ## Caveats
 
 Due to how FUSE works, there are certain limitations to the level of

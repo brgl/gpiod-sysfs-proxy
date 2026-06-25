@@ -22,6 +22,24 @@ authors = [
 Homepage = "https://github.com/brgl/gpiod-sysfs-proxy"
 Issues = "https://github.com/brgl/gpiod-sysfs-proxy/issues"
 
+[tool.setuptools.data-files]
+# Install the systemd template unit but do not enable any instance by default.
+# The admin enables the mountpoint they want, e.g.:
+#   systemctl enable --now gpiod-sysfs-proxy@run-gpio.service
+#
+# The .mount units provide the /sys/class overlay needed to expose
+# /sys/class/gpio on kernels where the sysfs GPIO interface is disabled. They
+# are inert until pulled in: only the sys-class-gpio instance requires them
+# (via the drop-in below) and they carry ConditionPathExists=!/sys/class/gpio.
+"lib/systemd/system" = [
+  "share/gpiod-sysfs-proxy@.service",
+  "share/run-gpio-sys.mount",
+  "share/sys-class.mount",
+]
+"lib/systemd/system/gpiod-sysfs-proxy@sys-class-gpio.service.d" = [
+  "share/gpiod-sysfs-proxy@sys-class-gpio.service.d/overlay.conf",
+]
+
 [build-system]
 requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
