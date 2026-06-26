@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: CC0-1.0
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+# Template unit: the instance name is the systemd-escaped mountpoint, e.g.
+#
+#   systemctl enable --now gpiod-sysfs-proxy@run-gpio.service
+#   systemctl enable --now gpiod-sysfs-proxy@sys-class-gpio.service
+#
+# Generate the instance name from a path with:
+#
+#   systemd-escape --path /run/gpio
+#   systemd-escape --path /sys/class/gpio
+#
+# Inside the unit %I expands back to the unescaped mountpoint path.
+#
+# Mounting over /sys/class/gpio only works when that directory already exists
+# (i.e. the kernel sysfs GPIO interface is enabled). To expose it on a kernel
+# where sysfs GPIO is disabled, see the overlay .mount example units shipped
+# alongside this file.
+
+[Unit]
+Description=User-space, libgpiod-based GPIO sysfs compatibility layer at %I
+
+[Service]
+RuntimeDirectory=gpio
+Type=simple
+ExecStart=/usr/bin/gpiod-sysfs-proxy %I -f -o allow_other -o default_permissions
+ExecStop=/bin/umount %I
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
