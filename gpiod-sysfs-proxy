@@ -12,7 +12,13 @@ import sys
 import time
 import traceback
 from argparse import ArgumentParser
+from importlib.metadata import PackageNotFoundError, version
 from threading import Lock, Thread
+
+try:
+    __version__ = version("gpiod-sysfs-proxy")
+except PackageNotFoundError:
+    __version__ = "unknown"
 
 import pyfuse3
 import trio
@@ -877,11 +883,55 @@ class GpioSysfsOperations(pyfuse3.Operations):
 
 
 def parse_args():
-    parser = ArgumentParser(description="User-space GPIO sysfs proxy")
-    parser.add_argument("mountpoint", help="Mount point")
-    parser.add_argument("-f", "--foreground", action="store_true", default=False)
-    parser.add_argument("-o", "--options", action="append", default=[])
-    parser.add_argument("-d", "--debug-fuse", action="store_true", default=False)
+    parser = ArgumentParser(
+        prog="gpiod-sysfs-proxy",
+        description=(
+            "Emulate the deprecated Linux GPIO sysfs interface "
+            "using the modern libgpiod character device API."
+        ),
+    )
+    parser.add_argument(
+        "mountpoint",
+        help="directory to mount the virtual GPIO sysfs filesystem over "
+        "(typically /sys/class/gpio)",
+    )
+    parser.add_argument(
+        "-f",
+        "--foreground",
+        action="store_true",
+        default=False,
+        help="run in the foreground instead of daemonising",
+    )
+    parser.add_argument(
+        "-o",
+        "--options",
+        action="append",
+        default=[],
+        metavar="OPT[,OPT...]",
+        help="pass comma-separated mount options through to FUSE; may be "
+        "given multiple times (e.g. -o allow_other,default_permissions)",
+    )
+    parser.add_argument(
+        "-d",
+        "--debug-fuse",
+        action="store_true",
+        default=False,
+        help="enable FUSE debug output (implies foreground operation)",
+    )
+    parser.add_argument(
+        "-V",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="show the program version and exit",
+    )
+
+    # Capitalise group titles.
+    # This is to allow help2man to promote the lists to dedicated sections in
+    # the generated manual page.
+    parser._positionals.title = "POSITIONAL ARGUMENTS"
+    parser._optionals.title = "OPTIONS"
+
     return parser.parse_args()
 
 
