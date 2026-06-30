@@ -118,3 +118,22 @@ allow to associate a hard-coded base with a GPIO chip by its label.
 
 * [sysfs-gpio-shim](https://github.com/info-beamer/sysfs-gpio-shim), written in
 C. Officially only supports Raspberry Pi.
+
+
+## Testing
+
+To test this project, you need to build a test image first using OpenEmbedded.
+
+Install `kas` using the [upstream instructions](https://kas.readthedocs.io/en/latest/userguide/getting-started.html).
+
+Install other tools required, for instance on debian:
+```
+sudo apt install
+
+TODO
+```
+
+Then build the image:
+```
+kas-container build tests/yocto/gpiod-sysfs-proxy-tests.yml
+```

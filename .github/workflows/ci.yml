@@ -1,0 +1,141 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <bartosz.golaszewski@linaro.org>
+
+name: CI
+
+on:
+  push:
+    #branches: [main]
+  pull_request:
+    #branches: [main]
+
+jobs:
+  ptest:
+    runs-on: ubuntu-22.04
+    # Full Yocto builds from a cold cache take several hours.
+    timeout-minutes: 480
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Remove large pre-installed packages that are unused in a Yocto build.
+      # This reclaims ~15 GB, bringing total available space to ~25 GB.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo apt-get remove -y '^aspnetcore-.*' '^dotnet-.*' '^llvm-.*' \
+            'php.*' '^mongodb-.*' '^mysql-.*' azure-cli google-cloud-cli \
+            google-chrome-stable firefox powershell mono-devel libgl1-mesa-dri \
+            --fix-broken 2>/dev/null || true
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          df -h
+
+      - name: Install Yocto host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gawk wget git diffstat unzip texinfo gcc build-essential \
+            chrpath socat cpio python3 python3-pip python3-pexpect \
+            xz-utils debianutils iputils-ping python3-git python3-jinja2 \
+            libegl1-mesa libsdl1.2-dev python3-subunit mesa-common-dev \
+            zstd liblz4-tool file locales libacl1 sshpass
+          sudo locale-gen en_US.UTF-8
+
+      - name: Install kas
+        run: pip3 install kas
+
+      - name: Restore downloads cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/yocto-downloads
+          key: yocto-downloads-${{ hashFiles('kas/ci.yml') }}
+          restore-keys: |
+            yocto-downloads-
+
+      - name: Restore sstate cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/yocto-sstate
+          key: yocto-sstate-${{ runner.arch }}-${{ hashFiles('kas/ci.yml') }}-${{ github.sha }}
+          restore-keys: |
+            yocto-sstate-${{ runner.arch }}-${{ hashFiles('kas/ci.yml') }}-
+            yocto-sstate-${{ runner.arch }}-
+
+      - name: Build image
+        run: kas build kas/ci.yml
+
+      - name: Run ptests in QEMU
+        timeout-minutes: 30
+        run: |
+          # kas checks out repos next to the project directory; poky ends up
+          # in the kas work dir (defaults to $GITHUB_WORKSPACE).
+          POKY_DIR="${GITHUB_WORKSPACE}/poky"
+          BUILD_DIR="${GITHUB_WORKSPACE}/build"
+
+          source "${POKY_DIR}/oe-init-build-env" "${BUILD_DIR}"
+
+          # Start QEMU with slirp (user-mode) networking; no root or tap device
+          # needed. runqemu maps host:2222 -> guest:22 by default under slirp.
+          runqemu qemux86-64 nographic slirp \
+            QB_KERNEL_CMDLINE_APPEND="console=ttyS0" &
+          QEMU_PID=$!
+
+          # Wait up to 5 minutes for SSH to become available.
+          READY=0
+          for i in $(seq 1 60); do
+            if sshpass -p "" ssh \
+                -p 2222 \
+                -o StrictHostKeyChecking=no \
+                -o ConnectTimeout=5 \
+                -o PasswordAuthentication=yes \
+                -o PreferredAuthentications=password \
+                root@localhost true 2>/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 5
+          done
+
+          if [ "${READY}" -ne 1 ]; then
+            echo "Timed out waiting for QEMU to boot" >&2
+            kill "${QEMU_PID}" || true
+            exit 1
+          fi
+
+          sshpass -p "" ssh \
+            -p 2222 \
+            -o StrictHostKeyChecking=no \
+            -o PasswordAuthentication=yes \
+            -o PreferredAuthentications=password \
+            root@localhost \
+            ptest-runner gpiod-sysfs-proxy \
+            | tee "${GITHUB_WORKSPACE}/ptest-results.txt"
+          RC=${PIPESTATUS[0]}
+
+          kill "${QEMU_PID}" || true
+          exit "${RC}"
+
+      - name: Upload ptest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ptest-results
+          path: ptest-results.txt
+
+      - name: Save downloads cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/yocto-downloads
+          key: yocto-downloads-${{ hashFiles('kas/ci.yml') }}
+
+      - name: Save sstate cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/yocto-sstate
+          key: yocto-sstate-${{ runner.arch }}-${{ hashFiles('kas/ci.yml') }}-${{ github.sha }}
