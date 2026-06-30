@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2024 Bartosz Golaszewski <brgl@kernel.org>
+
 build
 dist
 gpiod_sysfs_proxy.egg-info
