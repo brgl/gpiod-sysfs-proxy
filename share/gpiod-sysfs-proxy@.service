@@ -20,6 +20,7 @@
 
 [Unit]
 Description=User-space, libgpiod-based GPIO sysfs compatibility layer at %I
+Documentation=https://github.com/brgl/gpiod-sysfs-proxy
 
 [Service]
 RuntimeDirectory=gpio
