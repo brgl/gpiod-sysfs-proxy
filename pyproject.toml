@@ -23,6 +23,9 @@ Homepage = "https://github.com/brgl/gpiod-sysfs-proxy"
 Issues = "https://github.com/brgl/gpiod-sysfs-proxy/issues"
 Changelog = "https://github.com/brgl/gpiod-sysfs-proxy/blob/main/CHANGELOG.md"
 
+[tool.setuptools]
+packages = []
+
 [tool.setuptools.data-files]
 # Install the systemd template unit but do not enable any instance by default.
 # The admin enables the mountpoint they want, e.g.:
