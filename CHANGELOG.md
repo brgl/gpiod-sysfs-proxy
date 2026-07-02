@@ -8,6 +8,12 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [v1.0.2]
+
+### Fixed
+
+- Use absolute paths for mountpoints in systemd service
+
 ## [v1.0.1]
 
 ### Fixed
